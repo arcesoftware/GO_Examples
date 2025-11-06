@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Surreal Flying Particles</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: radial-gradient(circle at center, #020212, #000010);
+    }
+    canvas {
+      display: block;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+    }
+  </style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+<script type="module">
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl2', { antialias: false });
+if (!gl) alert('WebGL2 not supported');
+
+function resizeCanvas() {
+  const dpr = window.devicePixelRatio || 1;
+  const width = innerWidth * dpr;
+  const height = innerHeight * dpr;
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+  }
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+const vsSource = `#version 300 es
+precision highp float;
+in vec3 aPos;
+uniform mat4 uProjection;
+uniform mat4 uView;
+uniform float uPointSize;
+out float vDepth;
+void main() {
+  vec4 viewPos = uView * vec4(aPos, 1.0);
+  vDepth = -viewPos.z;
+  gl_Position = uProjection * viewPos;
+  gl_PointSize = uPointSize / (vDepth * 0.25);
+}
+`;
+
+const fsSource = `#version 300 es
+precision highp float;
+in float vDepth;
+out vec4 fragColor;
+void main() {
+  float t = clamp(vDepth / 80.0, 0.0, 1.0);
+  vec3 col = mix(vec3(1.0, 0.2, 0.2), vec3(0.1, 0.2, 1.0), t);
+  float d = length(gl_PointCoord - vec2(0.5));
+  float alpha = smoothstep(0.4, 0.0, d);
+  fragColor = vec4(col, alpha);
+}
+`;
+
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, vsSource));
+gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, fsSource));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+  throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const numParticles = 8000;
+const positions = new Float32Array(numParticles * 3);
+for (let i = 0; i < numParticles * 3; i += 3) {
+  positions[i] = (Math.random() - 0.5) * 100;
+  positions[i + 1] = (Math.random() - 0.5) * 100;
+  positions[i + 2] = (Math.random() - 0.5) * 100;
+}
+
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+
+const loc = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(loc);
+gl.vertexAttribPointer(loc, 3, gl.FLOAT, false, 0, 0);
+
+const uProjection = gl.getUniformLocation(prog, 'uProjection');
+const uView = gl.getUniformLocation(prog, 'uView');
+const uPointSize = gl.getUniformLocation(prog, 'uPointSize');
+
+// ----------- Math helpers -----------
+function mat4Perspective(out, fov, aspect, near, far) {
+  const f = 1.0 / Math.tan(fov / 2);
+  out[0] = f / aspect; out[1] = 0; out[2] = 0; out[3] = 0;
+  out[4] = 0; out[5] = f; out[6] = 0; out[7] = 0;
+  out[8] = 0; out[9] = 0; out[10] = (far + near) / (near - far); out[11] = -1;
+  out[12] = 0; out[13] = 0; out[14] = (2 * far * near) / (near - far); out[15] = 0;
+  return out;
+}
+function mat4LookAt(out, eye, center, up) {
+  const f = normalize(sub(center, eye));
+  const s = normalize(cross(f, up));
+  const u = cross(s, f);
+  out[0] = s[0]; out[1] = u[0]; out[2] = -f[0]; out[3] = 0;
+  out[4] = s[1]; out[5] = u[1]; out[6] = -f[1]; out[7] = 0;
+  out[8] = s[2]; out[9] = u[2]; out[10] = -f[2]; out[11] = 0;
+  out[12] = -dot(s, eye);
+  out[13] = -dot(u, eye);
+  out[14] = dot(f, eye);
+  out[15] = 1;
+  return out;
+}
+function sub(a,b){return[a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
+function cross(a,b){return[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];}
+function dot(a,b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
+function normalize(a){const l=Math.hypot(...a);return[a[0]/l,a[1]/l,a[2]/l];}
+
+// ----------- Perlin-like flow -----------
+function smoothNoise(t) { return Math.sin(t) * 0.5 + Math.sin(t * 0.7) * 0.3 + Math.sin(t * 1.3) * 0.2; }
+
+// ----------- Animation -----------
+gl.enable(gl.BLEND);
+gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+gl.clearColor(0, 0, 0, 1);
+
+let t = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  resizeCanvas();
+  t += 0.0035;
+
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  const aspect = canvas.width / canvas.height;
+  const projection = mat4Perspective(new Float32Array(16), Math.PI / 4, aspect, 0.1, 500);
+
+  // Smooth “organic” flight camera
+  const yaw = t * 0.3 + smoothNoise(t * 0.5) * 2.0;
+  const pitch = Math.sin(t * 0.5) * 0.3 + smoothNoise(t * 0.8) * 0.4;
+  const distance = 60 + Math.sin(t * 0.2) * 20 + smoothNoise(t * 0.1) * 10;
+
+  const eye = [
+    distance * Math.cos(pitch) * Math.sin(yaw),
+    distance * Math.sin(pitch),
+    distance * Math.cos(pitch) * Math.cos(yaw)
+  ];
+  const target = [
+    Math.sin(t * 0.3) * 10,
+    Math.sin(t * 0.4) * 5,
+    Math.cos(t * 0.25) * 10
+  ];
+
+  const view = mat4LookAt(new Float32Array(16), eye, target, [0, 1, 0]);
+
+  gl.uniformMatrix4fv(uProjection, false, projection);
+  gl.uniformMatrix4fv(uView, false, view);
+  gl.uniform1f(uPointSize, 180.0 + Math.sin(t * 0.7) * 40.0);
+
+  gl.bindVertexArray(vao);
+  gl.drawArrays(gl.POINTS, 0, numParticles);
+}
+animate();
+</script>
+</body>
+</html>
